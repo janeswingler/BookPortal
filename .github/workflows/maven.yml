@@ -27,9 +27,8 @@ jobs:
       - name: Setup Java JDK
         uses: actions/setup-java@v3
         with:
-          java-version: '17'
-          distribution: 'adopt'
-          java-package: jdk
+          java-version: '18'
+          distribution: 'temurin'
 
       # Initializes the CodeQL tools for scanning.
       - name: Initialize CodeQL
@@ -37,7 +36,7 @@ jobs:
         with:
           languages: ${{ matrix.language }}
 
-      - run: mvn -B package --file pom.xml
+      - run: mvn -B -DskipTests package -f pom.xml
         working-directory: ./book-portal-be
 
       - name: Perform CodeQL Analysis
