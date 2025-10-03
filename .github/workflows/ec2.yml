@@ -29,3 +29,4 @@ jobs:
             sudo docker-compose up -d
             sudo docker image prune -af
           comment: Re-deploy BookPortal stack on EC2 via docker-compose
+##
