@@ -58,4 +58,4 @@ jobs:
             --instance-id "$INSTANCE_IDS" \
             --query "{Status:Status, StdOut:StandardOutputContent, StdErr:StandardErrorContent}" \
             --output table
-##
+###
