@@ -4,33 +4,35 @@ on:
   workflow_run:
     workflows: ["Node.js CI"]
     types: [completed]
+  workflow_dispatch:
 
 jobs:
   on-success:
-
+    # run if manual OR if upstream workflow succeeded
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
-    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
     steps:
+      # 1) Load STS creds (+ session token) into env for all following steps
+      - name: Configure AWS credentials (includes session token)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
+          aws-region:            ${{ secrets.AWS_REGION }}
+
+      # 2) Send SSM command using the env creds above (no keys passed here)
       - name: AWS SSM Send-Command
         uses: peterkimzz/aws-ssm-send-command@v1.1.1
         with:
-          # AWS access key id
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          # AWS secret access key
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          # Where EC2 instance is
-          aws-region: ${{ secrets.AWS_REGION }}
-          # AWS EC2 Instance id or ids
-          instance-ids: ${{ secrets.AWS_INSTANCE_ID }}
-          # Command execution location
-          # !!! The line below may vary depending on where your docker-compose file is located.
+          aws-region:     ${{ secrets.AWS_REGION }}
+          instance-ids:   ${{ secrets.AWS_INSTANCE_ID }}
           working-directory: /home/ubuntu
-          # Bash commands you want to execute
           command: |
-            sudo docker-compose stop
-            sudo docker-compose rm -f
+            sudo docker-compose stop || true
+            sudo docker-compose rm -f || true
             sudo docker-compose pull
             sudo docker-compose up -d
             sudo docker image prune -af
-          # Comment for Send-Command
           comment: docker-compose.yml file re-pulls newer versions of book-portal images and runs them on the instance.
