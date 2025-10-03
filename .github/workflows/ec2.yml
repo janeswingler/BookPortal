@@ -1,127 +1,36 @@
 name: AWS-EC2 Instance CD
 
 on:
-  # Auto-run after your FE pipeline completes
   workflow_run:
     workflows: ["Node.js CI"]
     types: [completed]
 
-  # Allow manual runs from the Actions tab (handy in Learner Lab)
-  workflow_dispatch:
-
 jobs:
-  deploy:
-    # Run when manually dispatched OR when the upstream workflow succeeded
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+  on-success:
+
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
     steps:
-      # 1) Configure AWS using your repo secrets
-      - name: Configure AWS creds
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: AWS SSM Send-Command
+        uses: peterkimzz/aws-ssm-send-command@v1.1.1
         with:
-          aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
+          # AWS access key id
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          # AWS secret access key
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
-          aws-region:            ${{ secrets.AWS_REGION }}
-
-      # 2) Ensure the instance is running and online in SSM
-      - name: Verify instance is SSM-managed and running
-        env:
-          INSTANCE_ID: ${{ secrets.AWS_INSTANCE_ID }}
-          AWS_REGION:  ${{ secrets.AWS_REGION }}
-        run: |
-          set -euo pipefail
-          echo "Waiting for EC2 to be 'running'..."
-          aws ec2 wait instance-running --instance-ids "$INSTANCE_ID" --region "$AWS_REGION"
-          echo "Checking SSM PingStatus..."
-          PING=$(aws ssm describe-instance-information \
-            --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
-            --query 'InstanceInformationList[0].PingStatus' \
-            --output text || true)
-          echo "SSM PingStatus: $PING"
-          if [ "$PING" != "Online" ]; then
-            echo "::error ::Instance is not online in SSM (PingStatus=$PING). Ensure SSM agent is running and IAM role 'AmazonSSMManagedInstanceCore' is attached."
-            exit 1
-          fi
-
-      # 3) Send the redeploy command over SSM
-      - name: Send SSM redeploy command
-        env:
-          AWS_REGION:  ${{ secrets.AWS_REGION }}
-          INSTANCE_ID: ${{ secrets.AWS_INSTANCE_ID }}
-        run: |
-          set -euo pipefail
-
-          # Script that runs ON THE INSTANCE via SSM
-          REDEPLOY=$(cat <<'SCRIPT'
-          set -euxo pipefail
-
-          # Install Docker if missing
-          if ! command -v docker >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y ca-certificates curl gnupg
-            sudo install -m 0755 -d /etc/apt/keyrings
-            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
-            echo \
-              "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
-              $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
-              sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
-            sudo apt-get update -y
-            sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin
-            sudo usermod -aG docker ubuntu || true
-          fi
-
-          # Install Compose plugin if needed
-          if ! docker compose version >/dev/null 2>&1; then
-            sudo apt-get install -y docker-compose-plugin || true
-          fi
-
-          cd /home/ubuntu
-
-          # Pull latest images and bring stack up
-          (sudo docker compose pull || sudo docker-compose pull)
-          (sudo docker compose up -d || sudo docker-compose up -d)
-
-          # Clean unused layers
-          sudo docker image prune -af || true
-
-          echo "=== docker ps ==="
-          sudo docker ps
-          SCRIPT
-          )
-
-          # Send SSM command
-          CMD_ID=$(aws ssm send-command \
-            --region "$AWS_REGION" \
-            --instance-ids "$INSTANCE_ID" \
-            --document-name "AWS-RunShellScript" \
-            --comment "BookPortal: docker compose pull & up" \
-            --parameters commands="$REDEPLOY" \
-            --query 'Command.CommandId' \
-            --output text)
-
-          echo "CommandId=$CMD_ID"
-
-          # Wait for completion
-          aws ssm wait command-executed \
-            --region "$AWS_REGION" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID"
-
-          # Fetch and print results
-          aws ssm get-command-invocation \
-            --region "$AWS_REGION" \
-            --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_ID" \
-            --query '{Status:Status,StdOut:StandardOutputContent,StdErr:StandardErrorContent,ResponseCode:ResponseCode}' \
-            --output json | tee invocation.json
-
-          STATUS=$(jq -r '.Status' invocation.json)
-          RC=$(jq -r '.ResponseCode' invocation.json)
-
-          if [ "$STATUS" != "Success" ] || [ "$RC" != "0" ]; then
-            echo "::error ::SSM command failed (status=$STATUS, rc=$RC)"
-            exit 1
-          fi
+          # Where EC2 instance is
+          aws-region: ${{ secrets.AWS_REGION }}
+          # AWS EC2 Instance id or ids
+          instance-ids: ${{ secrets.AWS_INSTANCE_ID }}
+          # Command execution location
+          # !!! The line below may vary depending on where your docker-compose file is located.
+          working-directory: /home/ubuntu
+          # Bash commands you want to execute
+          command: |
+            sudo docker-compose stop
+            sudo docker-compose rm -f
+            sudo docker-compose pull
+            sudo docker-compose up -d
+            sudo docker image prune -af
+          # Comment for Send-Command
+          comment: docker-compose.yml file re-pulls newer versions of book-portal images and runs them on the instance.
