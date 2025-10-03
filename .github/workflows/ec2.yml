@@ -7,28 +7,25 @@ on:
 
 jobs:
   on-success:
-
     runs-on: ubuntu-latest
     if: ${{ github.event.workflow_run.conclusion == 'success' }}
+
     steps:
       - name: AWS SSM Send-Command
         uses: peterkimzz/aws-ssm-send-command@v1.1.1
+        # Learner Lab: provide the session token via ENV, not as an input
+        env:
+          AWS_SESSION_TOKEN: ${{ secrets.AWS_SESSION_TOKEN }}
         with:
-          # AWS credentials (Learner Lab needs session token too)
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ secrets.AWS_REGION }}
-          # EC2 Instance ID
           instance-ids: ${{ secrets.AWS_INSTANCE_ID }}
-          # Command execution location
           working-directory: /home/ubuntu
-          # Bash commands
           command: |
             sudo docker-compose stop || true
             sudo docker-compose rm -f || true
             sudo docker-compose pull
             sudo docker-compose up -d
             sudo docker image prune -af
-          # Comment for Send-Command
-          comment: docker-compose.yml file re-pulls newer versions of book-portal images and runs them on the instance.
+          comment: Re-deploy BookPortal stack on EC2 via docker-compose
