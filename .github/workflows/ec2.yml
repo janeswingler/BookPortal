@@ -1,6 +1,5 @@
 name: AWS-EC2 Instance CD
 
-####
 on:
   workflow_run:
     workflows: ["Node.js CI"]
@@ -15,17 +14,16 @@ jobs:
       - name: AWS SSM Send-Command
         uses: peterkimzz/aws-ssm-send-command@v1.1.1
         with:
-          # AWS access key id
+          # AWS credentials (Learner Lab needs session token too)
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          # AWS secret access key
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          # Where EC2 instance is
+          aws-session-token: ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region: ${{ secrets.AWS_REGION }}
-          # AWS EC2 Instance id or ids
+          # EC2 Instance ID
           instance-ids: ${{ secrets.AWS_INSTANCE_ID }}
           # Command execution location
           working-directory: /home/ubuntu
-          # Bash command you want to execute
+          # Bash commands
           command: |
             sudo docker-compose stop || true
             sudo docker-compose rm -f || true
