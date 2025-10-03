@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Configure AWS credentials (with session token)
+      - name: Configure AWS credentials (supports session token)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id:     ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -21,30 +21,65 @@ jobs:
           aws-region:            ${{ secrets.AWS_REGION }}
 
       - name: Send SSM redeploy command
+        id: ssm
+        env:
+          REGION:   ${{ secrets.AWS_REGION }}
+          INSTANCE: ${{ secrets.AWS_INSTANCE_ID }}
         run: |
-          REDEPLOY_CMD='cd /home/ubuntu && \
-            (sudo docker compose pull || sudo docker-compose pull) && \
-            (sudo docker compose up -d || sudo docker-compose up -d) && \
-            sudo docker image prune -af'
+          set -euo pipefail
+
+          # Build a safe commands array (avoids quoting issues)
+          PARAMS=$(
+            jq -cn '{
+              commands: [
+                "set -euxo pipefail",
+                "echo === whoami && whoami",
+                "echo === uname -a && uname -a",
+                "echo === PWD && pwd",
+                # Ensure docker present (simple path works on Ubuntu Learner Lab AMIs)
+                "if ! command -v docker >/dev/null 2>&1; then sudo apt-get update -y && sudo apt-get install -y docker.io; fi",
+                # Ensure compose present (plugin or classic)
+                "if ! docker compose version >/dev/null 2>&1 && ! command -v docker-compose >/dev/null 2>&1; then sudo apt-get install -y docker-compose || true; fi",
+                "cd /home/ubuntu",
+                "echo === list files && ls -la",
+                "(sudo docker compose pull || sudo docker-compose pull)",
+                "(sudo docker compose up -d || sudo docker-compose up -d)",
+                "sudo docker image prune -af || true",
+                "echo === docker ps && sudo docker ps"
+              ]
+            }'
+          )
 
           CMD_ID=$(aws ssm send-command \
-            --targets "Key=instanceIds,Values=${{ secrets.AWS_INSTANCE_ID }}" \
+            --region "$REGION" \
+            --instance-ids "$INSTANCE" \
             --document-name "AWS-RunShellScript" \
-            --comment "Redeploy BookPortal via docker-compose" \
-            --parameters "commands=$REDEPLOY_CMD" \
-            --region ${{ secrets.AWS_REGION }} \
+            --comment "Redeploy BookPortal" \
+            --parameters "$PARAMS" \
             --query "Command.CommandId" \
             --output text)
 
-          echo "Sent redeploy command with ID: $CMD_ID"
-          aws ssm wait command-executed \
-            --command-id "$CMD_ID" \
-            --instance-id "${{ secrets.AWS_INSTANCE_ID }}" \
-            --region ${{ secrets.AWS_REGION }}
+          echo "cmd_id=$CMD_ID" >> "$GITHUB_OUTPUT"
 
-          aws ssm get-command-invocation \
+      - name: Wait and fetch SSM output (always show logs)
+        env:
+          REGION:   ${{ secrets.AWS_REGION }}
+          INSTANCE: ${{ secrets.AWS_INSTANCE_ID }}
+          CMD_ID:   ${{ steps.ssm.outputs.cmd_id }}
+        run: |
+          set +e
+          aws ssm wait command-executed \
+            --region "$REGION" \
             --command-id "$CMD_ID" \
-            --instance-id "${{ secrets.AWS_INSTANCE_ID }}" \
-            --region ${{ secrets.AWS_REGION }} \
-            --query "{Status:Status, StdOut:StandardOutputContent, StdErr:StandardErrorContent}" \
-            --output table
+            --instance-id "$INSTANCE"
+          STATUS=$?
+
+          echo -e "\n=== SSM Invocation Output ==="
+          aws ssm get-command-invocation \
+            --region "$REGION" \
+            --command-id "$CMD_ID" \
+            --instance-id "$INSTANCE" \
+            --output table \
+            --query "{Status:Status, StdOut:StandardOutputContent, StdErr:StandardErrorContent}"
+
+          exit $STATUS
