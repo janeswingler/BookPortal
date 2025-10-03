@@ -1,21 +1,23 @@
 name: AWS-EC2 Instance CD
 
 on:
-  # run automatically after your FE pipeline succeeds
+  # Auto-run after your FE pipeline completes
   workflow_run:
     workflows: ["Node.js CI"]
     types: [completed]
 
-  # and allow manual runs from the Actions tab, which is handy for Learner Lab
+  # Allow manual runs from the Actions tab (handy in Learner Lab)
   workflow_dispatch:
 
 jobs:
   deploy:
+    # Run when manually dispatched OR when the upstream workflow succeeded
     if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
 
     steps:
-      # 1) Configure AWS using temp STS creds (session token supported)
+      # 1) Configure AWS using your repo secrets
       - name: Configure AWS creds
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -24,38 +26,102 @@ jobs:
           aws-session-token:     ${{ secrets.AWS_SESSION_TOKEN }}
           aws-region:            ${{ secrets.AWS_REGION }}
 
-      # 2) Send the SSM command to your EC2 instance
+      # 2) Ensure the instance is running and online in SSM
+      - name: Verify instance is SSM-managed and running
+        env:
+          INSTANCE_ID: ${{ secrets.AWS_INSTANCE_ID }}
+          AWS_REGION:  ${{ secrets.AWS_REGION }}
+        run: |
+          set -euo pipefail
+          echo "Waiting for EC2 to be 'running'..."
+          aws ec2 wait instance-running --instance-ids "$INSTANCE_ID" --region "$AWS_REGION"
+          echo "Checking SSM PingStatus..."
+          PING=$(aws ssm describe-instance-information \
+            --filters "Key=InstanceIds,Values=$INSTANCE_ID" \
+            --query 'InstanceInformationList[0].PingStatus' \
+            --output text || true)
+          echo "SSM PingStatus: $PING"
+          if [ "$PING" != "Online" ]; then
+            echo "::error ::Instance is not online in SSM (PingStatus=$PING). Ensure SSM agent is running and IAM role 'AmazonSSMManagedInstanceCore' is attached."
+            exit 1
+          fi
+
+      # 3) Send the redeploy command over SSM
       - name: Send SSM redeploy command
         env:
-          AWS_REGION:   ${{ secrets.AWS_REGION }}
-          INSTANCE_IDS: ${{ secrets.AWS_INSTANCE_ID }}
+          AWS_REGION:  ${{ secrets.AWS_REGION }}
+          INSTANCE_ID: ${{ secrets.AWS_INSTANCE_ID }}
         run: |
-          # Build the command we want to run on the instance
-          REDEPLOY_CMD='cd /home/ubuntu && \
-            (sudo docker-compose pull || sudo docker compose pull) && \
-            (sudo docker-compose up -d || sudo docker compose up -d) && \
-            sudo docker image prune -af'
+          set -euo pipefail
 
-          # Send it via SSM
+          # Script that runs ON THE INSTANCE via SSM
+          REDEPLOY=$(cat <<'SCRIPT'
+          set -euxo pipefail
+
+          # Install Docker if missing
+          if ! command -v docker >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y ca-certificates curl gnupg
+            sudo install -m 0755 -d /etc/apt/keyrings
+            curl -fsSL https://download.docker.com/linux/ubuntu/gpg | sudo gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+            echo \
+              "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/ubuntu \
+              $(. /etc/os-release && echo $VERSION_CODENAME) stable" | \
+              sudo tee /etc/apt/sources.list.d/docker.list > /dev/null
+            sudo apt-get update -y
+            sudo apt-get install -y docker-ce docker-ce-cli containerd.io docker-buildx-plugin
+            sudo usermod -aG docker ubuntu || true
+          fi
+
+          # Install Compose plugin if needed
+          if ! docker compose version >/dev/null 2>&1; then
+            sudo apt-get install -y docker-compose-plugin || true
+          fi
+
+          cd /home/ubuntu
+
+          # Pull latest images and bring stack up
+          (sudo docker compose pull || sudo docker-compose pull)
+          (sudo docker compose up -d || sudo docker-compose up -d)
+
+          # Clean unused layers
+          sudo docker image prune -af || true
+
+          echo "=== docker ps ==="
+          sudo docker ps
+          SCRIPT
+          )
+
+          # Send SSM command
           CMD_ID=$(aws ssm send-command \
             --region "$AWS_REGION" \
-            --instance-ids "$INSTANCE_IDS" \
+            --instance-ids "$INSTANCE_ID" \
             --document-name "AWS-RunShellScript" \
-            --comment "Redeploy BookPortal via docker-compose" \
-            --parameters commands="$REDEPLOY_CMD" \
-            --query "Command.CommandId" \
+            --comment "BookPortal: docker compose pull & up" \
+            --parameters commands="$REDEPLOY" \
+            --query 'Command.CommandId' \
             --output text)
 
-          echo "CommandId: $CMD_ID"
+          echo "CommandId=$CMD_ID"
 
-          # (optional) Wait until it finishes and print output
+          # Wait for completion
           aws ssm wait command-executed \
+            --region "$AWS_REGION" \
             --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_IDS"
+            --instance-id "$INSTANCE_ID"
 
+          # Fetch and print results
           aws ssm get-command-invocation \
+            --region "$AWS_REGION" \
             --command-id "$CMD_ID" \
-            --instance-id "$INSTANCE_IDS" \
-            --query "{Status:Status, StdOut:StandardOutputContent, StdErr:StandardErrorContent}" \
-            --output table
-###
+            --instance-id "$INSTANCE_ID" \
+            --query '{Status:Status,StdOut:StandardOutputContent,StdErr:StandardErrorContent,ResponseCode:ResponseCode}' \
+            --output json | tee invocation.json
+
+          STATUS=$(jq -r '.Status' invocation.json)
+          RC=$(jq -r '.ResponseCode' invocation.json)
+
+          if [ "$STATUS" != "Success" ] || [ "$RC" != "0" ]; then
+            echo "::error ::SSM command failed (status=$STATUS, rc=$RC)"
+            exit 1
+          fi
